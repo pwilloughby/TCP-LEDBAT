@@ -252,7 +252,7 @@ static void tcp_ledbat_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 	offset = ((s64) target) - (queue_delay);
 
 	offset *= gain_num;
-	offset = do_div(offset, gain_den);
+	do_div(offset, gain_den);
 
 	/* Do not ramp more than TCP. */
 	if (offset > target)
@@ -484,23 +484,22 @@ static void tcp_ledbat_rtt_sample(struct sock *sk, u32 rtt)
 /**
  * tcp_ledbat_pkts_acked
  */
-static void tcp_ledbat_pkts_acked(struct sock *sk,
-				  const struct ack_sample *sample)
+static void tcp_ledbat_pkts_acked(struct sock *sk, u32 num_acked, s32 rtt_us)
 {
 	struct ledbat *ledbat = inet_csk_ca(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
 
-	if (sample->rtt_us > 0)
-		tcp_ledbat_rtt_sample(sk, sample->rtt_us);
+	if (rtt_us > 0)
+		tcp_ledbat_rtt_sample(sk, rtt_us);
 
 	if (ledbat->last_ack == 0)
 		ledbat->last_ack = tcp_time_stamp;
-	else if (before(tcp_time_stamp, ledbat->last_ack + (tp->srtt_us >> 3))) {
-		/* we haven't receive an acknoledgement for more than an rtt.
+	else if (after(tcp_time_stamp, ledbat->last_ack + usecs_to_jiffies(tp->srtt_us >> 3))) {
+		/* we haven't received an acknowledgement for more than a rtt.
 		   Set the congestion window to 1. */
-		ledbat->last_ack = tcp_time_stamp;
 		tp->snd_cwnd = 1;
 	}
+	ledbat->last_ack = tcp_time_stamp;
 
 }
 
