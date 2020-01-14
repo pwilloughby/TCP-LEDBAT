@@ -477,6 +477,9 @@ static void tcp_ledbat_rtt_sample(struct sock *sk, u32 rtt)
 		return;
 	}
 
+	/* halve rtt to approximate owd, tcp_ledbat_owd_calculator does not work */ 
+	mowd = rtt / USEC_PER_MSEC / 2;
+
 	ledbat_update_current_delay(ledbat, (u32) mowd);
 	ledbat_update_base_delay(ledbat, (u32) mowd);
 }
