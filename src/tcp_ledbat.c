@@ -15,12 +15,8 @@
 #include <net/tcp.h>
 #include <linux/vmalloc.h>
 
-/* resolution of owd */
-#define LP_RESOL       1000
-
 #define  DEBUG_SLOW_START    0
 #define  DEBUG_DELAY         0
-#define  DEBUG_OWD_HZ        0
 #define  DEBUG_NOISE_FILTER  0
 #define  DEBUG_BASE_HISTO    0
 
@@ -64,8 +60,7 @@ struct owd_circ_buf {
 
 /**
  * enum tcp_ledbat_state
- * @LP_VALID_RHZ: is remote HZ valid?
- * @LP_VALID_OWD: is OWD valid?
+ * @LP_VALID_OWD: are the init_circbufs initialized?
  * @LP_WITHIN_THR: are we within threshold?
  * @LP_WITHIN_INF: are we within inference?
  *
@@ -73,7 +68,6 @@ struct owd_circ_buf {
  * We create this set of state flags mainly for debugging.
  */
 enum tcp_ledbat_state {
-	LEDBAT_VALID_RHZ = (1 << 0),
 	LEDBAT_VALID_OWD = (1 << 1),
 	LEDBAT_INCREASING = (1 << 2),
 	LEDBAT_CAN_SS = (1 << 3),
@@ -135,6 +129,7 @@ static void tcp_ledbat_init(struct sock *sk)
 	if (do_ss) {
 		ledbat->flag |= LEDBAT_CAN_SS;
 	}
+	ledbat->flag |= LEDBAT_VALID_OWD;
 
 }
 
@@ -290,94 +285,6 @@ static void tcp_ledbat_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 
 }
 
-/**
- * tcp_ledbat_remote_hz_estimator
- *
- * Estimate remote HZ.
- * We keep on updating the estimated value, where original TCP-LP
- * implementation only guesses it once and uses it forever.
- */
-static u32 tcp_ledbat_remote_hz_estimator(struct sock *sk)
-{
-	struct tcp_sock *tp = tcp_sk(sk);
-	struct ledbat *ledbat = inet_csk_ca(sk);
-	s64 rhz = ledbat->remote_hz << 6;	/* remote HZ << 6 */
-	s64 m = 0;
-
-	if (ledbat->last_rollover == 0)
-		ledbat->last_rollover = tcp_time_stamp;
-
-	/* not yet record reference time
-	 * go away!! record it before come back!! */
-	if (ledbat->remote_ref_time == 0 || ledbat->local_ref_time == 0)
-		goto out;
-
-	/* we can't calc remote HZ with no difference!! */
-	if (tp->rx_opt.rcv_tsval == ledbat->remote_ref_time
-	    || tp->rx_opt.rcv_tsecr == ledbat->local_ref_time)
-		goto out;
-
-	m = HZ * (tp->rx_opt.rcv_tsval -
-		  ledbat->remote_ref_time) / (tp->rx_opt.rcv_tsecr -
-					      ledbat->local_ref_time);
-	if (m < 0)
-		m = -m;
-
-	if (rhz > 0) {
-		m -= rhz >> 6;	/* m is now wrong in remote HZ est */
-		rhz += m;	/* 63/64 old + 1/64 new */
-	} else
-		rhz = m << 6;
-
- out:
-	/* record time for successful remote HZ calc */
-	if ((rhz >> 6) > 0)
-		ledbat->flag |= LEDBAT_VALID_RHZ;
-	else
-		ledbat->flag &= ~LEDBAT_VALID_RHZ;
-
-	/* record reference time stamp */
-
-	ledbat->remote_ref_time = tp->rx_opt.rcv_tsval;
-	ledbat->local_ref_time = tp->rx_opt.rcv_tsecr;
-
-	return rhz >> 6;
-}
-
-/**
- * tcp_ledbat_owd_calculator
- *
- * I stole this code from tcp_lp.c. Please also see comment for 
- * tcp_lp_owd_calculator.
- */
-static u32 tcp_ledbat_owd_calculator(struct sock *sk)
-{
-	struct tcp_sock *tp = tcp_sk(sk);
-	struct ledbat *ledbat = inet_csk_ca(sk);
-	s64 owd = 0;
-
-	ledbat->remote_hz = tcp_ledbat_remote_hz_estimator(sk);
-
-	if (ledbat->flag & LEDBAT_VALID_RHZ) {
-		owd = tp->rx_opt.rcv_tsval * (LP_RESOL / ledbat->remote_hz) -
-		    tp->rx_opt.rcv_tsecr * (LP_RESOL / HZ);
-		if (owd < 0)
-			owd = -owd;
-	}
-
-	/* Safe net. */
-	if (owd > 0)
-		ledbat->flag |= LEDBAT_VALID_OWD;
-	else
-		ledbat->flag &= ~LEDBAT_VALID_OWD;
-
-#if DEBUG_OWD_HZ
-	printk(KERN_DEBUG "my_hz %u, hz %u owd %u\n", HZ,
-	       (u32) ledbat->remote_hz, (u32) owd);
-#endif
-	return owd;
-}
-
 static void ledbat_add_delay(struct owd_circ_buf *cb, u32 owd)
 {
 	u8 i;
@@ -469,19 +376,15 @@ static void ledbat_update_base_delay(struct ledbat *ledbat, u32 owd)
 static void tcp_ledbat_rtt_sample(struct sock *sk, u32 rtt)
 {
 	struct ledbat *ledbat = inet_csk_ca(sk);
-	s64 mowd = tcp_ledbat_owd_calculator(sk);
+	/* halve rtt to approximate owd, tcp_ledbat_owd_calculator does not work */ 
+	u32 mowd = rtt / USEC_PER_MSEC / 2;
 
 	/* sorry that we don't have valid data */
-	if (!(ledbat->flag & LEDBAT_VALID_RHZ)
-	    || !(ledbat->flag & LEDBAT_VALID_OWD)) {
+	if (!(ledbat->flag & LEDBAT_VALID_OWD))
 		return;
-	}
 
-	/* halve rtt to approximate owd, tcp_ledbat_owd_calculator does not work */ 
-	mowd = rtt / USEC_PER_MSEC / 2;
-
-	ledbat_update_current_delay(ledbat, (u32) mowd);
-	ledbat_update_base_delay(ledbat, (u32) mowd);
+	ledbat_update_current_delay(ledbat, mowd);
+	ledbat_update_base_delay(ledbat, mowd);
 }
 
 /**
@@ -501,6 +404,9 @@ static void tcp_ledbat_pkts_acked(struct sock *sk, u32 num_acked, s32 rtt_us)
 		/* we haven't received an acknowledgement for more than a rtt.
 		   Set the congestion window to 1. */
 		tp->snd_cwnd = 1;
+#if DEBUG_DELAY
+		printk(KERN_DEBUG "time %u reset cogestion window", tcp_time_stamp);
+#endif
 	}
 	ledbat->last_ack = tcp_time_stamp;
 
