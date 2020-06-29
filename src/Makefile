@@ -3,11 +3,12 @@ IDIR= /lib/modules/$(shell uname -r)/kernel/net/ipv4/
 KDIR := /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 default:
-	$(MAKE) -C $(KDIR) SUBDIRS=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 install:
 	install -v -m 644 tcp_ledbat.ko $(IDIR)
 	depmod
+	modprobe -r tcp_ledbat
 	modprobe tcp_ledbat
 	sysctl -w net.ipv4.tcp_allowed_congestion_control="cubic reno ledbat"
 
