@@ -400,8 +400,10 @@ static void tcp_ledbat_pkts_acked(struct sock *sk,
 	else if (after(tcp_time_stamp(tp), ledbat->last_ack + (tp->srtt_us >> 3)/(USEC_PER_SEC/TCP_TS_HZ))) {
 		/* we haven't received an acknowledgement for more than a rtt.
 		   Set the congestion window to 1. */
+#if DEBUG_DELAY
 	        printk(KERN_DEBUG "resetting snd_cwnd tcp_time_stamp(tp) %u, last_ack %u, srtt %lu\n",
 				tcp_time_stamp(tp), ledbat->last_ack, (tp->srtt_us>>3)/(USEC_PER_SEC/TCP_TS_HZ));
+#endif
 		tp->snd_cwnd = 1;
 	}
 	ledbat->last_ack = tcp_time_stamp(tp);
